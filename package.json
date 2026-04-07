@@ -1,12 +1,11 @@
 {
   "name": "stremio-network-hunter",
-  "version": "4.1.0",
+  "version": "5.0.0",
   "main": "index.js",
   "scripts": {"start": "node index.js"},
   "dependencies": {
     "stremio-addon-sdk": "^1.0.4",
-    "cheerio": "^1.0.0-rc.12",
-    "axios": "^1.6.0"
+    "cheerio": "^1.0.0-rc.12"
   },
   "engines": {"node": "18.x"}
 }
