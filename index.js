@@ -1,4 +1,4 @@
-const { addonBuilder, serveHTTP } = require('@stremio/addon-sdk');
+const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 const cheerio = require('cheerio');
 
 const builder = new addonBuilder({
