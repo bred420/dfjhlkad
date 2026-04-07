@@ -8,7 +8,14 @@ const builder = new addonBuilder({
     description: 'VIPBOX UFC/WWE HLS streams with tokens',
     resources: ['catalog', 'meta', 'stream'],
     types: ['series'],
-    idPrefixes: ['vipbox']
+    idPrefixes: ['vipbox'],
+    catalogs: [
+        {
+            type: 'series',
+            id: 'vipbox_ufc',
+            name: 'UFC/WWE Live'
+        }
+    ]
 });
 
 builder.defineCatalogHandler(async (args) => {
@@ -100,18 +107,18 @@ async function extractM3U8Tokens(url) {
         const m3u8Matches = [...content.matchAll(/https?:\/\/[^"\s]+\.m3u8(?:\?[^"\s]*)?/gi)];
         
         m3u8Matches.forEach(match => {
-            const url = match[0];
-            if (url.includes('token=') || url.includes('key=') || url.includes('auth=')) {
+            const matchUrl = match[0];
+            if (matchUrl.includes('token=') || matchUrl.includes('key=') || matchUrl.includes('auth=')) {
                 streams.push({
-                    url,
-                    title: `VIPBOX HLS ${url.includes('token') ? 'Token' : 'Auth'}`,
-                    name: `VIPBOX ${getQuality(url)}`
+                    url: matchUrl,
+                    title: `VIPBOX HLS ${matchUrl.includes('token') ? 'Token' : 'Auth'}`,
+                    name: `VIPBOX ${getQuality(matchUrl)}`
                 });
             }
         });
     });
     
-    // Method 2: Embedded player sources (Network Tab emulation)
+    // Method 2: Embedded player sources
     const playerSources = $('iframe[src*="embed"], .player source, video source')
         .map((i, el) => $(el).attr('src') || $(el).data('src'))
         .get();
@@ -126,7 +133,7 @@ async function extractM3U8Tokens(url) {
         }
     }
     
-    return streams.slice(0, 5); // Limit per site
+    return streams.slice(0, 5);
 }
 
 function getQuality(url) {
