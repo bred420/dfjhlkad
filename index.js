@@ -17,6 +17,38 @@ const CATEGORY_PATHS = [
     '/darts-live', '/snooker-live', '/fighting-live', '/others-live',
 ];
 
+// Known CDN/stream domains used by VIPBox and similar sites
+// Add more here if you find them with the Tampermonkey script
+const STREAM_DOMAINS = [
+    'strmd.top',
+    'strmd.net',
+    'streamhls.top',
+    'hlsstream.top',
+    'cdn.streamed',
+    'live.streamed',
+    'streamjc.com',
+    'streamjockey',
+    'vipstreams',
+    'streamtp',
+    'playerjs',
+];
+
+// Regex patterns to find stream URLs in page source
+const STREAM_PATTERNS = [
+    // strmd.top style: /secure/TOKEN/rtmp/stream/CHANNEL/1/playlist.m3u8
+    /https?:\/\/[^"'\s]+\/secure\/[^"'\s]+\/[^"'\s]+\.m3u8/gi,
+    // Generic m3u8 with token params
+    /https?:\/\/[^"'\s]+\.m3u8\?(?:token|auth|key|sig|hash)=[^"'\s]*/gi,
+    // Generic m3u8
+    /https?:\/\/[^"'\s]+playlist\.m3u8[^"'\s]*/gi,
+    /https?:\/\/[^"'\s]+index\.m3u8[^"'\s]*/gi,
+    /https?:\/\/[^"'\s]+master\.m3u8[^"'\s]*/gi,
+    // PlayerJS file sources
+    /file\s*:\s*["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/gi,
+    /source\s*:\s*["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/gi,
+    /["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/gi,
+];
+
 // ── Cache ─────────────────────────────────────────────────────────────────────
 const cache = new Map();
 function fromCache(key, ttlMs) {
@@ -26,7 +58,7 @@ function fromCache(key, ttlMs) {
 }
 function toCache(key, data) { cache.set(key, { data, ts: Date.now() }); }
 
-// ── Plain fetch for catalog pages ─────────────────────────────────────────────
+// ── Plain fetch for listing pages ─────────────────────────────────────────────
 async function fetchHtml(url, timeoutMs = 10000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -36,6 +68,7 @@ async function fetchHtml(url, timeoutMs = 10000) {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Referer': BASE_URL,
             }
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -45,6 +78,29 @@ async function fetchHtml(url, timeoutMs = 10000) {
     }
 }
 
+// ── Extract all stream URLs from a block of text ──────────────────────────────
+function extractStreamUrls(text) {
+    const found = new Set();
+    for (const pattern of STREAM_PATTERNS) {
+        pattern.lastIndex = 0;
+        const matches = [...text.matchAll(pattern)];
+        for (const m of matches) {
+            // m[1] is the capture group if present, otherwise m[0]
+            const url = (m[1] || m[0]).trim().replace(/['"` ]/g, '');
+            if (
+                url.startsWith('http') &&
+                url.includes('.m3u8') &&
+                !url.includes('demo') &&
+                !url.includes('sample') &&
+                !url.includes('test.m3u8')
+            ) {
+                found.add(url);
+            }
+        }
+    }
+    return [...found];
+}
+
 // ── Connect to Browserless ────────────────────────────────────────────────────
 async function getBrowser() {
     return puppeteer.connect({
@@ -52,27 +108,28 @@ async function getBrowser() {
     });
 }
 
-// ── Scrape a single page with Puppeteer, log EVERY network request ────────────
-async function scrapePageForM3U8(browser, url, label) {
+// ── Open a page, intercept network + scan source for stream URLs ──────────────
+async function extractFromPage(browser, pageUrl, referer, label) {
     const page = await browser.newPage();
-    const found = new Map();
-    const allRequests = [];
+    const intercepted = new Set();
 
     await page.setUserAgent(
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     );
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    await page.setExtraHTTPHeaders({
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': referer || BASE_URL,
+    });
     await page.setRequestInterception(true);
 
+    // Network interception — catch m3u8 requests live as they fire
     page.on('request', req => {
-        const u = req.url();
-        allRequests.push(u);
-
-        if (u.includes('.m3u8') || u.includes('playlist') || u.includes('manifest')) {
-            console.log(`[${label}] 🎯 Possible stream request: ${u}`);
-            found.set(u, { url: u, name: `VIPBox ${getQuality(u)}`, title: `VIPBox ${getQuality(u)}`, behaviorHints: { notWebReady: false } });
-        }
-
+        const url = req.url();
+        const urls = extractStreamUrls(url);
+        urls.forEach(u => {
+            console.log(`[${label}] 🎯 Network request: ${u}`);
+            intercepted.add(u);
+        });
         if (['image', 'font', 'stylesheet'].includes(req.resourceType())) {
             req.abort();
         } else {
@@ -81,127 +138,105 @@ async function scrapePageForM3U8(browser, url, label) {
     });
 
     page.on('response', async response => {
-        const u = response.url();
+        const url = response.url();
         const ct = response.headers()['content-type'] || '';
-        if (u.includes('.m3u8') || ct.includes('mpegurl') || ct.includes('x-mpegURL')) {
-            console.log(`[${label}] 🎯 Stream response detected: ${u} (${ct})`);
-            found.set(u, { url: u, name: `VIPBox ${getQuality(u)}`, title: `VIPBox ${getQuality(u)}`, behaviorHints: { notWebReady: false } });
+        if (url.includes('.m3u8') || ct.includes('mpegurl') || ct.includes('x-mpegURL')) {
+            console.log(`[${label}] 🎯 Network response: ${url}`);
+            intercepted.add(url);
         }
     });
 
+    let iframeSrcs = [];
+
     try {
-        console.log(`[${label}] Navigating to: ${url}`);
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-        await new Promise(r => setTimeout(r, 6000));
+        await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        await new Promise(r => setTimeout(r, 5000));
 
-        // Log ALL requests made so we can see what the page is calling
-        console.log(`[${label}] All network requests (${allRequests.length} total):`);
-        allRequests.forEach(u => {
-            // Only log non-trivial requests
-            if (!u.includes('google') && !u.includes('favicon') && !u.includes('analytics')) {
-                console.log(`  -> ${u}`);
-            }
-        });
-
-        // Try clicking any play button that might trigger the stream
+        // Try clicking a play button if present
         try {
-            await page.click('.play-button, .vjs-big-play-button, button[class*="play"], [id*="play"], .fp-play');
+            await page.click('.play-button, .vjs-big-play-button, .fp-play, [class*="play-btn"], [id*="play"]');
             console.log(`[${label}] Clicked play button`);
             await new Promise(r => setTimeout(r, 4000));
-        } catch (_) {
-            console.log(`[${label}] No play button found`);
-        }
+        } catch (_) {}
 
-        // Dump any script content that contains 'file' or 'source' or 'stream'
-        const scriptContent = await page.evaluate(() => {
-            const scripts = Array.from(document.querySelectorAll('script:not([src])'));
-            return scripts.map(s => s.innerHTML).join('\n');
+        // Scan all inline script content for stream URLs
+        const scriptTexts = await page.evaluate(() =>
+            Array.from(document.querySelectorAll('script:not([src])')).map(s => s.innerHTML).join('\n')
+        );
+        const fromScripts = extractStreamUrls(scriptTexts);
+        fromScripts.forEach(u => {
+            console.log(`[${label}] 📄 Found in scripts: ${u}`);
+            intercepted.add(u);
         });
 
-        // Look for stream URLs in JS variables
-        const urlPatterns = [
-            /["'](https?:\/\/[^"']+\.m3u8[^"']*)['"]/gi,
-            /["'](https?:\/\/[^"']+playlist[^"']*)['"]/gi,
-            /file\s*:\s*["'](https?:\/\/[^"']+)['"]/gi,
-            /source\s*:\s*["'](https?:\/\/[^"']+)['"]/gi,
-            /src\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)['"]/gi,
-            /url\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)['"]/gi,
-        ];
+        // Also scan full page HTML
+        const pageHtml = await page.content();
+        const fromHtml = extractStreamUrls(pageHtml);
+        fromHtml.forEach(u => {
+            console.log(`[${label}] 📄 Found in HTML: ${u}`);
+            intercepted.add(u);
+        });
 
-        for (const pattern of urlPatterns) {
-            const matches = [...scriptContent.matchAll(pattern)];
-            matches.forEach(m => {
-                const u = m[1];
-                console.log(`[${label}] 📄 Found in script: ${u}`);
-                if (!found.has(u)) {
-                    found.set(u, { url: u, name: `VIPBox Script ${getQuality(u)}`, title: `VIPBox Script ${getQuality(u)}`, behaviorHints: { notWebReady: false } });
-                }
-            });
-        }
-
-        // Get all iframe srcs
-        const iframeSrcs = await page.$$eval('iframe', els =>
-            els.map(el => el.src || el.getAttribute('data-src')).filter(s => s && s.startsWith('http'))
+        // Collect iframe sources for the caller to follow
+        iframeSrcs = await page.$$eval('iframe', els =>
+            els.map(el => el.src || el.getAttribute('data-src') || '').filter(s => s.startsWith('http'))
         );
-        console.log(`[${label}] Found ${iframeSrcs.length} iframes:`, iframeSrcs);
+        console.log(`[${label}] Found ${iframeSrcs.length} iframes`);
 
-        return { found: [...found.values()], iframeSrcs };
-
+    } catch (e) {
+        console.error(`[${label}] Page error:`, e.message);
     } finally {
         await page.close();
     }
+
+    return { urls: [...intercepted], iframeSrcs };
 }
 
-// ── Main stream scraper ───────────────────────────────────────────────────────
+// ── Main scraper: event page → iframes → nested iframes ──────────────────────
 async function scrapeStreams(eventUrl) {
     const cacheKey = `streams:${eventUrl}`;
     const cached = fromCache(cacheKey, 2 * 60 * 1000);
     if (cached) return cached;
 
-    if (!BROWSERLESS_TOKEN) return { streams: [], poster: null };
+    if (!BROWSERLESS_TOKEN) return { streams: [] };
 
     const browser = await getBrowser();
-    const allStreams = new Map();
+    const allUrls = new Set();
 
     try {
-        // Step 1: scrape the main event page
-        const { found: mainFound, iframeSrcs } = await scrapePageForM3U8(browser, eventUrl, 'MAIN');
-        mainFound.forEach(s => allStreams.set(s.url, s));
+        // Level 1: main event page
+        const { urls: mainUrls, iframeSrcs } = await extractFromPage(browser, eventUrl, BASE_URL, 'MAIN');
+        mainUrls.forEach(u => allUrls.add(u));
 
-        // Step 2: follow every iframe
+        // Level 2: iframes on the event page
         for (const src of iframeSrcs.slice(0, 5)) {
-            try {
-                const { found: embedFound, iframeSrcs: nestedSrcs } = await scrapePageForM3U8(browser, src, 'IFRAME');
-                embedFound.forEach(s => allStreams.set(s.url, s));
+            const { urls: embedUrls, iframeSrcs: nestedSrcs } = await extractFromPage(browser, src, eventUrl, 'IFRAME');
+            embedUrls.forEach(u => allUrls.add(u));
 
-                // Step 3: follow nested iframes (players sometimes have 2 levels)
-                for (const nested of nestedSrcs.slice(0, 3)) {
-                    try {
-                        const { found: nestedFound } = await scrapePageForM3U8(browser, nested, 'NESTED');
-                        nestedFound.forEach(s => allStreams.set(s.url, s));
-                    } catch (e) {
-                        console.error('Nested iframe error:', e.message);
-                    }
-                }
-            } catch (e) {
-                console.error('Iframe error:', e.message);
+            // Level 3: nested iframes (some players are double-embedded)
+            for (const nested of nestedSrcs.slice(0, 3)) {
+                const { urls: nestedUrls } = await extractFromPage(browser, nested, src, 'NESTED');
+                nestedUrls.forEach(u => allUrls.add(u));
             }
         }
 
-        const streams = [...allStreams.values()]
-            .filter(s => !s.url.includes('demo') && !s.url.includes('sample'))
-            .slice(0, 10);
+        const streams = [...allUrls].map(url => ({
+            url,
+            name: `VIPBox ${getQuality(url)}`,
+            title: `VIPBox ${getQuality(url)}`,
+            behaviorHints: { notWebReady: false }
+        }));
 
-        console.log(`Final streams found: ${streams.length}`);
-        streams.forEach(s => console.log(' -', s.url));
+        console.log(`✅ Total streams found for ${eventUrl}: ${streams.length}`);
+        streams.forEach(s => console.log('  -', s.url));
 
-        const result = { streams, poster: null };
+        const result = { streams };
         toCache(cacheKey, result);
         return result;
 
     } catch (e) {
         console.error('Scrape error:', e.message);
-        return { streams: [], poster: null };
+        return { streams: [] };
     } finally {
         await browser.disconnect();
     }
@@ -214,7 +249,7 @@ function getQuality(url) {
     return 'HLS';
 }
 
-// ── Scrape all events ─────────────────────────────────────────────────────────
+// ── Events scraper ────────────────────────────────────────────────────────────
 async function getAllEvents() {
     const cached = fromCache('all_events', 5 * 60 * 1000);
     if (cached) return cached;
@@ -253,7 +288,7 @@ async function searchEvents(query) {
 // ── Addon ─────────────────────────────────────────────────────────────────────
 const builder = new addonBuilder({
     id: 'org.vipbox.allsports',
-    version: '6.0.0',
+    version: '7.0.0',
     name: 'VIPBox Live Sports',
     description: 'Search live sports streams from VIPBox by event name or teams',
     resources: ['catalog', 'meta', 'stream'],
