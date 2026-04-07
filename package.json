@@ -1,6 +1,6 @@
 {
-  "name": "m3u8-hunter",
-  "version": "1.0.0",
+  "name": "vipbox-live-sports",
+  "version": "4.0.0",
   "main": "index.js",
   "engines": {
     "node": ">=20.18.1"
@@ -10,6 +10,9 @@
   },
   "dependencies": {
     "stremio-addon-sdk": "^1.6.9",
-    "cheerio": "^1.0.0"
+    "cheerio": "^1.0.0",
+    "puppeteer": "^21.0.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }
