@@ -1,11 +1,16 @@
 {
-  "name": "stremio-network-hunter",
-  "version": "5.0.0",
+  "name": "m3u8-hunter",
+  "version": "1.0.0",
+  "description": "VIPBOX m3u8 token scraper",
   "main": "index.js",
-  "scripts": {"start": "node index.js"},
-  "dependencies": {
-    "stremio-addon-sdk": "^1.0.4",
-    "cheerio": "^1.0.0-rc.12"
+  "engines": {
+    "node": ">=20.18.1"
   },
-  "engines": {"node": "18.x"}
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@stremio/addon-sdk": "^1.2.0",
+    "cheerio": "^1.0.0-rc.12"
+  }
 }
