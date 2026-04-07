@@ -141,20 +141,4 @@ function isValidHLS(stream) {
            !stream.url.includes('sample');
 }
 
-serveHTTP(builder.getInterface(), async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    
-    if (req.method === 'OPTIONS') {
-        res.status(200).end();
-        return;
-    }
-    
-    try {
-        await builder.serve(req, res);
-    } catch (e) {
-        console.error('Serve error:', e);
-        res.status(500).json({ error: 'Internal error' });
-    }
-});
+serveHTTP(builder.getInterface(), { port: process.env.PORT || 7000 });
