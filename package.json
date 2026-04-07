@@ -4,10 +4,13 @@
   "description": "VIPBOX m3u8 token scraper",
   "main": "index.js",
   "engines": {
-    "node": ">=20.18.1"
+    "node": ">=20.18.1",
+    "npm": ">=10.0.0"
   },
+  "packageManager": "npm@10.0.0",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "postinstall": "npm rebuild"
   },
   "dependencies": {
     "@stremio/addon-sdk": "^1.2.0",
