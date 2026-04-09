@@ -258,10 +258,23 @@ function eventToMeta(ev) {
     };
 }
 
+// ── Parse event URL back from a stream request ID ─────────────────────────────
+// Stream handler receives IDs like:
+//   vipbox:wwe:wwe-nxt-streams:1:1   (with season:episode suffix)
+//   vipbox:wwe:wwe-nxt-streams       (without suffix)
+// We need to reconstruct: https://www.vipbox.lc/wwe/wwe-nxt-streams
+function idToEventUrl(id) {
+    // Strip trailing :SEASON:EPISODE if present (one or two numeric segments at the end)
+    const clean = id.replace(/:(\d+):(\d+)$/, '').replace(/:(\d+)$/, '');
+    // Strip the vipbox: prefix and convert remaining colons to slashes
+    const path = clean.replace(/^vipbox:/, '').replace(/:/g, '/');
+    return `${BASE_URL}/${path}`;
+}
+
 // ── Addon ─────────────────────────────────────────────────────────────────────
 const builder = new addonBuilder({
     id: 'org.vipbox.allsports',
-    version: '8.0.0',
+    version: '9.0.0',
     name: 'VIPBox Live Sports',
     description: 'Browse and search live sports streams from VIPBox',
     resources: ['catalog', 'meta', 'stream'],
@@ -269,16 +282,16 @@ const builder = new addonBuilder({
     idPrefixes: ['vipbox'],
     catalogs: [
         {
-            // This one shows up on the Discover page as a browsable category
+            // Discover page category
             type: 'series',
             id: 'vipbox_live',
             name: 'VIPBox Live Sports',
             extra: [
-                { name: 'skip' } // enables pagination
+                { name: 'skip' }
             ]
         },
         {
-            // This one powers the search bar
+            // Search bar
             type: 'series',
             id: 'vipbox_search',
             name: 'VIPBox Live Sports',
@@ -289,10 +302,9 @@ const builder = new addonBuilder({
     ]
 });
 
-// ── Catalog handler ───────────────────────────────────────────────────────────
+// ── Catalog ───────────────────────────────────────────────────────────────────
 builder.defineCatalogHandler(async (args) => {
     try {
-        // Search catalog
         if (args.id === 'vipbox_search') {
             const query = args.extra && args.extra.search;
             if (!query) return { metas: [] };
@@ -300,12 +312,10 @@ builder.defineCatalogHandler(async (args) => {
             return { metas: events.slice(0, 100).map(eventToMeta) };
         }
 
-        // Discover/browse catalog
         if (args.id === 'vipbox_live') {
             const events = await getAllEvents();
             const skip = parseInt((args.extra && args.extra.skip) || 0);
-            const page = events.slice(skip, skip + 50); // 50 per page
-            return { metas: page.map(eventToMeta) };
+            return { metas: events.slice(skip, skip + 50).map(eventToMeta) };
         }
 
         return { metas: [] };
@@ -315,7 +325,7 @@ builder.defineCatalogHandler(async (args) => {
     }
 });
 
-// ── Meta handler ──────────────────────────────────────────────────────────────
+// ── Meta ──────────────────────────────────────────────────────────────────────
 builder.defineMetaHandler(async (args) => {
     if (!args.id.startsWith('vipbox:')) return { meta: null };
 
@@ -326,6 +336,9 @@ builder.defineMetaHandler(async (args) => {
         .replace(/-/g, ' ')
         .replace(/\b\w/g, c => c.toUpperCase());
 
+    // Video ID must match exactly what the stream handler will receive
+    const videoId = `${args.id}:1:1`;
+
     return {
         meta: {
             id: args.id,
@@ -334,9 +347,9 @@ builder.defineMetaHandler(async (args) => {
             poster: 'https://www.vipbox.lc/img/vipbox.svg',
             description: `Watch ${name} live on VIPBox`,
             videos: [{
-                id: `${args.id}:1:1`,
+                id: videoId,
                 title: 'Live Stream',
-                season: 1,
+                season: 1,    // Must be 1, not 0
                 episode: 1,
                 released: new Date().toISOString()
             }]
@@ -344,13 +357,14 @@ builder.defineMetaHandler(async (args) => {
     };
 });
 
-// ── Stream handler ────────────────────────────────────────────────────────────
+// ── Stream ────────────────────────────────────────────────────────────────────
 builder.defineStreamHandler(async (args) => {
     if (!args.id.startsWith('vipbox:')) return { streams: [] };
 
-    const cleanId = args.id.replace(/:1:1$/, '');
-    const path = cleanId.replace('vipbox:', '').replace(/:/g, '/');
-    const eventUrl = `${BASE_URL}/${path}`;
+    console.log('Stream request for ID:', args.id);
+
+    const eventUrl = idToEventUrl(args.id);
+    console.log('Resolved event URL:', eventUrl);
 
     try {
         const { streams } = await scrapeStreams(eventUrl);
