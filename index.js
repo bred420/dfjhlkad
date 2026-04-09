@@ -17,33 +17,12 @@ const CATEGORY_PATHS = [
     '/darts-live', '/snooker-live', '/fighting-live', '/others-live',
 ];
 
-// Known CDN/stream domains used by VIPBox and similar sites
-// Add more here if you find them with the Tampermonkey script
-const STREAM_DOMAINS = [
-    'strmd.top',
-    'strmd.net',
-    'streamhls.top',
-    'hlsstream.top',
-    'cdn.streamed',
-    'live.streamed',
-    'streamjc.com',
-    'streamjockey',
-    'vipstreams',
-    'streamtp',
-    'playerjs',
-];
-
-// Regex patterns to find stream URLs in page source
 const STREAM_PATTERNS = [
-    // strmd.top style: /secure/TOKEN/rtmp/stream/CHANNEL/1/playlist.m3u8
     /https?:\/\/[^"'\s]+\/secure\/[^"'\s]+\/[^"'\s]+\.m3u8/gi,
-    // Generic m3u8 with token params
     /https?:\/\/[^"'\s]+\.m3u8\?(?:token|auth|key|sig|hash)=[^"'\s]*/gi,
-    // Generic m3u8
     /https?:\/\/[^"'\s]+playlist\.m3u8[^"'\s]*/gi,
     /https?:\/\/[^"'\s]+index\.m3u8[^"'\s]*/gi,
     /https?:\/\/[^"'\s]+master\.m3u8[^"'\s]*/gi,
-    // PlayerJS file sources
     /file\s*:\s*["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/gi,
     /source\s*:\s*["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/gi,
     /["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/gi,
@@ -58,7 +37,7 @@ function fromCache(key, ttlMs) {
 }
 function toCache(key, data) { cache.set(key, { data, ts: Date.now() }); }
 
-// ── Plain fetch for listing pages ─────────────────────────────────────────────
+// ── Plain fetch ───────────────────────────────────────────────────────────────
 async function fetchHtml(url, timeoutMs = 10000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -78,14 +57,13 @@ async function fetchHtml(url, timeoutMs = 10000) {
     }
 }
 
-// ── Extract all stream URLs from a block of text ──────────────────────────────
+// ── Extract stream URLs from text ─────────────────────────────────────────────
 function extractStreamUrls(text) {
     const found = new Set();
     for (const pattern of STREAM_PATTERNS) {
         pattern.lastIndex = 0;
         const matches = [...text.matchAll(pattern)];
         for (const m of matches) {
-            // m[1] is the capture group if present, otherwise m[0]
             const url = (m[1] || m[0]).trim().replace(/['"` ]/g, '');
             if (
                 url.startsWith('http') &&
@@ -101,14 +79,14 @@ function extractStreamUrls(text) {
     return [...found];
 }
 
-// ── Connect to Browserless ────────────────────────────────────────────────────
+// ── Browserless connection ────────────────────────────────────────────────────
 async function getBrowser() {
     return puppeteer.connect({
         browserWSEndpoint: `wss://chrome.browserless.io?token=${BROWSERLESS_TOKEN}&stealth=true`,
     });
 }
 
-// ── Open a page, intercept network + scan source for stream URLs ──────────────
+// ── Scrape a single page for stream URLs ─────────────────────────────────────
 async function extractFromPage(browser, pageUrl, referer, label) {
     const page = await browser.newPage();
     const intercepted = new Set();
@@ -122,12 +100,10 @@ async function extractFromPage(browser, pageUrl, referer, label) {
     });
     await page.setRequestInterception(true);
 
-    // Network interception — catch m3u8 requests live as they fire
     page.on('request', req => {
         const url = req.url();
-        const urls = extractStreamUrls(url);
-        urls.forEach(u => {
-            console.log(`[${label}] 🎯 Network request: ${u}`);
+        extractStreamUrls(url).forEach(u => {
+            console.log(`[${label}] 🎯 Network: ${u}`);
             intercepted.add(u);
         });
         if (['image', 'font', 'stylesheet'].includes(req.resourceType())) {
@@ -141,7 +117,7 @@ async function extractFromPage(browser, pageUrl, referer, label) {
         const url = response.url();
         const ct = response.headers()['content-type'] || '';
         if (url.includes('.m3u8') || ct.includes('mpegurl') || ct.includes('x-mpegURL')) {
-            console.log(`[${label}] 🎯 Network response: ${url}`);
+            console.log(`[${label}] 🎯 Response: ${url}`);
             intercepted.add(url);
         }
     });
@@ -152,39 +128,31 @@ async function extractFromPage(browser, pageUrl, referer, label) {
         await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 30000 });
         await new Promise(r => setTimeout(r, 5000));
 
-        // Try clicking a play button if present
         try {
             await page.click('.play-button, .vjs-big-play-button, .fp-play, [class*="play-btn"], [id*="play"]');
-            console.log(`[${label}] Clicked play button`);
             await new Promise(r => setTimeout(r, 4000));
         } catch (_) {}
 
-        // Scan all inline script content for stream URLs
         const scriptTexts = await page.evaluate(() =>
             Array.from(document.querySelectorAll('script:not([src])')).map(s => s.innerHTML).join('\n')
         );
-        const fromScripts = extractStreamUrls(scriptTexts);
-        fromScripts.forEach(u => {
-            console.log(`[${label}] 📄 Found in scripts: ${u}`);
+        extractStreamUrls(scriptTexts).forEach(u => {
+            console.log(`[${label}] 📄 Script: ${u}`);
             intercepted.add(u);
         });
 
-        // Also scan full page HTML
         const pageHtml = await page.content();
-        const fromHtml = extractStreamUrls(pageHtml);
-        fromHtml.forEach(u => {
-            console.log(`[${label}] 📄 Found in HTML: ${u}`);
+        extractStreamUrls(pageHtml).forEach(u => {
+            console.log(`[${label}] 📄 HTML: ${u}`);
             intercepted.add(u);
         });
 
-        // Collect iframe sources for the caller to follow
         iframeSrcs = await page.$$eval('iframe', els =>
             els.map(el => el.src || el.getAttribute('data-src') || '').filter(s => s.startsWith('http'))
         );
-        console.log(`[${label}] Found ${iframeSrcs.length} iframes`);
 
     } catch (e) {
-        console.error(`[${label}] Page error:`, e.message);
+        console.error(`[${label}] Error:`, e.message);
     } finally {
         await page.close();
     }
@@ -192,7 +160,7 @@ async function extractFromPage(browser, pageUrl, referer, label) {
     return { urls: [...intercepted], iframeSrcs };
 }
 
-// ── Main scraper: event page → iframes → nested iframes ──────────────────────
+// ── Main stream scraper ───────────────────────────────────────────────────────
 async function scrapeStreams(eventUrl) {
     const cacheKey = `streams:${eventUrl}`;
     const cached = fromCache(cacheKey, 2 * 60 * 1000);
@@ -204,16 +172,13 @@ async function scrapeStreams(eventUrl) {
     const allUrls = new Set();
 
     try {
-        // Level 1: main event page
         const { urls: mainUrls, iframeSrcs } = await extractFromPage(browser, eventUrl, BASE_URL, 'MAIN');
         mainUrls.forEach(u => allUrls.add(u));
 
-        // Level 2: iframes on the event page
         for (const src of iframeSrcs.slice(0, 5)) {
             const { urls: embedUrls, iframeSrcs: nestedSrcs } = await extractFromPage(browser, src, eventUrl, 'IFRAME');
             embedUrls.forEach(u => allUrls.add(u));
 
-            // Level 3: nested iframes (some players are double-embedded)
             for (const nested of nestedSrcs.slice(0, 3)) {
                 const { urls: nestedUrls } = await extractFromPage(browser, nested, src, 'NESTED');
                 nestedUrls.forEach(u => allUrls.add(u));
@@ -227,9 +192,7 @@ async function scrapeStreams(eventUrl) {
             behaviorHints: { notWebReady: false }
         }));
 
-        console.log(`✅ Total streams found for ${eventUrl}: ${streams.length}`);
-        streams.forEach(s => console.log('  -', s.url));
-
+        console.log(`✅ Streams found: ${streams.length}`);
         const result = { streams };
         toCache(cacheKey, result);
         return result;
@@ -285,44 +248,74 @@ async function searchEvents(query) {
     return events.filter(e => e.title.toLowerCase().includes(q));
 }
 
+function eventToMeta(ev) {
+    return {
+        id: ev.id,
+        type: 'series',
+        name: ev.title,
+        poster: 'https://www.vipbox.lc/img/vipbox.svg',
+        description: `Live on VIPBox: ${ev.title}`
+    };
+}
+
 // ── Addon ─────────────────────────────────────────────────────────────────────
 const builder = new addonBuilder({
     id: 'org.vipbox.allsports',
-    version: '7.0.0',
+    version: '8.0.0',
     name: 'VIPBox Live Sports',
-    description: 'Search live sports streams from VIPBox by event name or teams',
+    description: 'Browse and search live sports streams from VIPBox',
     resources: ['catalog', 'meta', 'stream'],
     types: ['series'],
     idPrefixes: ['vipbox'],
-    catalogs: [{
-        type: 'series',
-        id: 'vipbox_search',
-        name: 'VIPBox Live Sports',
-        extra: [{ name: 'search', isRequired: false }]
-    }]
+    catalogs: [
+        {
+            // This one shows up on the Discover page as a browsable category
+            type: 'series',
+            id: 'vipbox_live',
+            name: 'VIPBox Live Sports',
+            extra: [
+                { name: 'skip' } // enables pagination
+            ]
+        },
+        {
+            // This one powers the search bar
+            type: 'series',
+            id: 'vipbox_search',
+            name: 'VIPBox Live Sports',
+            extra: [
+                { name: 'search', isRequired: true }
+            ]
+        }
+    ]
 });
 
+// ── Catalog handler ───────────────────────────────────────────────────────────
 builder.defineCatalogHandler(async (args) => {
     try {
-        const events = (args.extra && args.extra.search)
-            ? await searchEvents(args.extra.search)
-            : await getAllEvents();
+        // Search catalog
+        if (args.id === 'vipbox_search') {
+            const query = args.extra && args.extra.search;
+            if (!query) return { metas: [] };
+            const events = await searchEvents(query);
+            return { metas: events.slice(0, 100).map(eventToMeta) };
+        }
 
-        return {
-            metas: events.slice(0, 100).map(ev => ({
-                id: ev.id,
-                type: 'series',
-                name: ev.title,
-                poster: 'https://www.vipbox.lc/img/vipbox.svg',
-                description: `Live on VIPBox: ${ev.title}`
-            }))
-        };
+        // Discover/browse catalog
+        if (args.id === 'vipbox_live') {
+            const events = await getAllEvents();
+            const skip = parseInt((args.extra && args.extra.skip) || 0);
+            const page = events.slice(skip, skip + 50); // 50 per page
+            return { metas: page.map(eventToMeta) };
+        }
+
+        return { metas: [] };
     } catch (e) {
         console.error('Catalog error:', e.message);
         return { metas: [] };
     }
 });
 
+// ── Meta handler ──────────────────────────────────────────────────────────────
 builder.defineMetaHandler(async (args) => {
     if (!args.id.startsWith('vipbox:')) return { meta: null };
 
@@ -351,6 +344,7 @@ builder.defineMetaHandler(async (args) => {
     };
 });
 
+// ── Stream handler ────────────────────────────────────────────────────────────
 builder.defineStreamHandler(async (args) => {
     if (!args.id.startsWith('vipbox:')) return { streams: [] };
 
